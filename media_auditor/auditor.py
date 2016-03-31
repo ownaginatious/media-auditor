@@ -1,50 +1,52 @@
 import json
-import os
-import subprocess
-import logging
+from os import walk
+from pathlib import Path
+from subprocess import Popen
 import sys
-import tempfile
+
+
+class NotAMediaFileError(Exception):
+    pass
+
+
+class CorruptedMediaError(Exception):
+    def __init__(self. path, reason):
+        self.reason = reason
+        super(CorruptedMediaError, self).__init__(path)
+
 
 class MediaAuditor(object):
 
-    LOGGER = logging.getLogger(__name__)
-    NOT_MEDIA = "Invalid data found when processing input"
+    _NOT_MEDIA = "Invalid data found when processing input"
+    _COMMAND = ('ffprobe', '-show_streams', '-print_format', 'json')
 
-    def find_media_files(self):
+    @staticmethod
+    def scan(path, ignore_nonmedia=True, skip_failures=True):
+        for d, _, files in walk(path):
+            for f in (Path(d).joinpath(x) for x in files):
+                try:
+                    yield self.probe_file(f)
+                except NotAMediaFileError as e:
+                    if not ignore_nonmedia:
+                        return dict(path=e.message, error='not a media file')
+                except CorruptedMediaError as e:
+                    if not skip_failures:
+                        return dict(path=e.message, error=e.reason)
 
-        for d, subdirs, files in os.walk('/Users/dillon/Dropbox'):
-            for f in files:
-                f = d + "/" + f
+    @staticmethod
+    def probe_file(path):
 
-                # Don't check non-regular files (e.g. socket/device handles)
-                if not os.path.isfile(f):
-                    continue
-
-                with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-
-                    p = subprocess.Popen(['ffprobe', '-show_streams', '-print_format', 'json', f],
-                            stdout=stdout,
-                            stderr=stderr)
-
-                    code = p.wait()
-
-                    stdout.seek(0)
-                    stderr.seek(0)
-
-                    out = stdout.read().decode('utf-8')
-                    err = stderr.read().decode('utf-8')
-
-                    if code == 0:
-                        data = json.loads(out)
-                        data['path'] = f
-                        yield data
-                    elif self.NOT_MEDIA in err:
-                        self.LOGGER.debug("The file is not a media file '{}'".format(f))
-                    else:
-                       self.LOGGER.warn("Error probing '{}': {}...".format(f, err[0:30]))
-
-logger = logging.getLogger(MediaAuditor.__name__)
-logger.addHandler(logging.StreamHandler(stream=sys.stdout))
-
-ma = MediaAuditor()
-print("Found {} media files".format(len([x for x in ma.find_media_files()])))
+        # Skip non-regular files (e.g. socket/device handles)
+        if not path.is_file():
+            continue
+        command = MediaAuditor._COMMAND + (path.path,)
+        with Popen(command, stdout=PIPE, stderr=PIPE) as p:
+            output = p.read().decode('utf-8')
+            code = p.wait()
+            if code == 0:
+                data = json.loads(output)
+                data['path'] = path.path
+            elif MediaAuditor._NOT_MEDIA in output:
+                raise NotAMediaFileError(path.path)
+            else:
+                raise CorruptedMediaError(path.path, output)
